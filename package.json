@@ -1,0 +1,31 @@
+{
+  "name": "multi-db-mcp-server",
+  "version": "0.3.0",
+  "description": "Model Context Protocol server supporting multiple databases: Oracle, PostgreSQL, and SQL Server with table discovery and metadata tools",
+  "type": "module",
+  "main": "dist/db-mcp.js",
+  "bin": {
+    "multi-db-mcp": "dist/db-mcp.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:bundle": "esbuild db-mcp.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/db-mcp.bundle.js --external:oracledb --external:pg --external:mssql --minify",
+    "start": "node dist/db-mcp.js",
+    "dev": "tsx db-mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "mssql": "^11.0.1",
+    "oracledb": "^6.9.0",
+    "pg": "^8.13.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/mssql": "^9.1.5",
+    "@types/pg": "^8.11.10",
+    "esbuild": "^0.25.10",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
