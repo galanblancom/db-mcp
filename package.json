@@ -1,7 +1,7 @@
 {
   "name": "multi-db-mcp-server",
-  "version": "0.3.0",
-  "description": "Model Context Protocol server supporting multiple databases: Oracle, PostgreSQL, and SQL Server with table discovery and metadata tools",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server with 22 tools supporting Oracle, PostgreSQL, SQL Server, MySQL, and SQLite. Features: streaming, transactions, templates, schema comparison, connection pooling, caching, and comprehensive monitoring",
   "type": "module",
   "main": "dist/db-mcp.js",
   "bin": {
@@ -9,20 +9,23 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:bundle": "esbuild db-mcp.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/db-mcp.bundle.js --external:oracledb --external:pg --external:mssql --minify",
+    "build:bundle": "esbuild db-mcp.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/db-mcp.bundle.js --external:oracledb --external:pg --external:mssql --external:mysql2 --external:better-sqlite3 --minify",
     "start": "node dist/db-mcp.js",
     "dev": "tsx db-mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.1",
+    "better-sqlite3": "^11.7.0",
     "mssql": "^11.0.1",
+    "mysql2": "^3.11.5",
     "oracledb": "^6.9.0",
     "pg": "^8.13.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/better-sqlite3": "^7.6.12",
     "@types/mssql": "^9.1.5",
+    "@types/node": "^20.0.0",
     "@types/pg": "^8.11.10",
     "esbuild": "^0.25.10",
     "tsx": "^4.0.0",
