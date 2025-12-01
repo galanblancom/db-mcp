@@ -1,0 +1,88 @@
+<div class="container">
+  <h1>Angular MCP Client</h1>
+  
+  <div class="connection-panel">
+    <input [(ngModel)]="sseUrl" placeholder="SSE URL (e.g., http://localhost:8081/mcp/sse)" />
+    <button (click)="connect()" [disabled]="isConnected">{{ isConnected ? 'Connected' : 'Connect' }}</button>
+    <span class="status-indicator" [class.connected]="isConnected">{{ isConnected ? '● Connected' : '○ Disconnected' }}</span>
+  </div>
+
+  <div class="main-content">
+    <div class="chat-panel">
+      <div class="chat-header">
+        <h2>💬 Chat with AI Assistant</h2>
+        <div class="thread-info" *ngIf="currentThreadId">
+          <span class="thread-badge">Thread: {{ currentThreadId.substring(0, 8) }}...</span>
+        </div>
+        <div class="thread-info" *ngIf="!currentThreadId">
+          <span class="thread-badge new">New Conversation</span>
+        </div>
+      </div>
+      <div class="chat-messages" #chatMessages>
+        <div class="welcome-message" *ngIf="chatHistory.length === 0">
+          <p>👋 Hello! I'm your database assistant with conversation memory.</p>
+          <p>I can help you query databases and remember our previous exchanges.</p>
+          <p>Try asking me about tables, running queries, or anything database-related!</p>
+        </div>
+        <div *ngFor="let msg of chatHistory" 
+             [class]="'chat-message ' + msg.type">
+          <div class="message-label">{{ msg.type === 'user' ? 'You' : 'AI Assistant' }}</div>
+          <div class="message-content" [innerHTML]="msg.content"></div>
+        </div>
+        <div *ngIf="isSendingMessage" class="loading-message">
+          <div class="loading-spinner"></div>
+          <span class="loading-text">Thinking...</span>
+        </div>
+      </div>
+      <div class="chat-controls">
+        <button (click)="newConversation()" class="control-button" title="Start a new conversation">
+          🔄 New Thread
+        </button>
+        <button (click)="clearConversation()" class="control-button" title="Clear current conversation">
+          🗑️ Clear
+        </button>
+        <button (click)="showThreads()" class="control-button" title="View all active conversations">
+          📋 Threads ({{ threadCount }})
+        </button>
+      </div>
+      <div class="chat-input-container">
+        <input 
+          [(ngModel)]="chatMessage" 
+          (keyup.enter)="sendChatMessage()"
+          [disabled]="isSendingMessage"
+          [placeholder]="isSendingMessage ? 'Waiting for response...' : 'Ask me about your database...'"
+          class="chat-input" />
+        <button (click)="sendChatMessage()" [disabled]="isSendingMessage" class="send-button">
+          {{ isSendingMessage ? 'Waiting...' : 'Send' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="tools-panel">
+      <h2>Available Tools</h2>
+      <div *ngFor="let tool of tools$ | async" class="tool-card">
+        <h3>{{ tool.name }}</h3>
+        <p>{{ tool.description }}</p>
+        <button (click)="selectTool(tool)">Select</button>
+      </div>
+    </div>
+
+    <div class="execution-panel" *ngIf="selectedTool">
+      <h2>Execute: {{ selectedTool.name }}</h2>
+      <textarea [(ngModel)]="toolArgs" rows="10" placeholder="JSON Arguments"></textarea>
+      <button (click)="executeTool()">Execute</button>
+      
+      <div *ngIf="executionResult" class="result-box">
+        <h3>Result:</h3>
+        <pre>{{ executionResult | json }}</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="logs-panel">
+    <h2>Logs</h2>
+    <div class="logs-container">
+      <div *ngFor="let log of logs$ | async">{{ log }}</div>
+    </div>
+  </div>
+</div>

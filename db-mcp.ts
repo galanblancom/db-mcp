@@ -176,6 +176,14 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// Tool counter to avoid hardcoding
+let toolCount = 0;
+const originalToolMethod = server.tool.bind(server);
+server.tool = function(...args: Parameters<typeof originalToolMethod>) {
+  toolCount++;
+  return originalToolMethod(...args);
+} as typeof server.tool;
+
 // =============================================================================
 // TOOL 1: Run Query (Enhanced)
 // =============================================================================
@@ -1526,7 +1534,7 @@ async function main() {
     await server.connect(transport);
     
     console.error(`✓ Multi-Database MCP Server started successfully`);
-    console.error(`\nAvailable tools (16):`);
+    console.error(`\nAvailable tools (${toolCount}):`);
     console.error(`  Core: run-query, get-table-info, list-tables, get-row-count`);
     console.error(`  Schema: list-schemas, list-views, get-view-definition`);
     console.error(`  Advanced: get-indexes, get-foreign-keys, list-stored-procedures`);
