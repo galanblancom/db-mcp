@@ -60,3 +60,4 @@ temp/
 *.db
 *.sqlite
 *.sqlite3
+spring-boot-server/target/
