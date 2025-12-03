@@ -1,8 +1,9 @@
 package com.javamcp.dbmcp.controller;
 
+import com.javamcp.dbmcp.model.request.FolderContextRequest;
+import com.javamcp.dbmcp.service.FolderContextService;
 import com.javamcp.dbmcp.service.OpenAIChatService;
-import com.theokanning.openai.completion.chat.ChatMessage;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.javamcp.dbmcp.service.ai.AiChatProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -11,7 +12,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * REST Controller for chat functionality with conversation thread support
@@ -23,10 +23,11 @@ import java.util.Optional;
 public class ChatController {
 
     private final OpenAIChatService chatService;
+    private final FolderContextService folderContextService;
 
-    @Autowired
-    public ChatController(OpenAIChatService chatService) {
+    public ChatController(OpenAIChatService chatService, FolderContextService folderContextService) {
         this.chatService = chatService;
+        this.folderContextService = folderContextService;
     }
 
     /**
@@ -83,7 +84,7 @@ public class ChatController {
     @GetMapping("/{threadId}/history")
     public ResponseEntity<Map<String, Object>> getHistory(@PathVariable String threadId) {
         try {
-            List<ChatMessage> history = chatService.getConversationHistory(threadId);
+            List<AiChatProvider.ChatMessage> history = chatService.getConversationHistory(threadId);
             
             Map<String, Object> response = new HashMap<>();
             response.put("threadId", threadId);
@@ -132,6 +133,44 @@ public class ChatController {
             response.put("threads", threads);
             
             return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse("Error: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Send a message with folder context
+     * POST /api/chat/with-context
+     * Body: { "message": "Your message", "contextFolders": ["/path/to/folder1", "/path/to/folder2"], "threadId": "optional-thread-id" }
+     */
+    @PostMapping("/with-context")
+    public ResponseEntity<Map<String, Object>> chatWithFolderContext(@RequestBody FolderContextRequest request) {
+        String message = request.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return ResponseEntity.badRequest()
+                    .body(createErrorResponse("Message is required"));
+        }
+
+        try {
+            // Generate context from both folders and files
+            String folderContext = folderContextService.generateContext(
+                request.getContextFolders(), 
+                request.getContextFiles()
+            );
+            
+            // Combine context with user message
+            String enhancedMessage = folderContext + "\n\nUser Question: " + message;
+            
+            // Use thread ID if provided, otherwise create new conversation
+            OpenAIChatService.ChatResult result;
+            if (request.getThreadId() != null && !request.getThreadId().trim().isEmpty()) {
+                result = chatService.chat(request.getThreadId(), enhancedMessage);
+            } else {
+                result = chatService.chat(enhancedMessage);
+            }
+            
+            return ResponseEntity.ok(createSuccessResponse(result.getResponse(), result.getThreadId()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(createErrorResponse("Error: " + e.getMessage()));

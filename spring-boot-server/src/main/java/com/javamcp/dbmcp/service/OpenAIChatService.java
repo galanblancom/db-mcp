@@ -1,11 +1,11 @@
 package com.javamcp.dbmcp.service;
 
 import com.javamcp.dbmcp.model.openai.FunctionDefinition;
+import com.javamcp.dbmcp.service.ai.AiChatProvider;
+import com.javamcp.dbmcp.service.ai.AiChatProvider.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.theokanning.openai.completion.chat.*;
-import com.theokanning.openai.service.OpenAiService;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -14,23 +14,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
-@ConditionalOnProperty(name = "openai.api.key")
+@ConditionalOnBean(AiChatProvider.class)
 public class OpenAIChatService {
 
-    private final OpenAiService openAiService;
+    private final AiChatProvider aiProvider;
     private final FunctionCallHandler functionCallHandler;
     private final ObjectMapper objectMapper;
-
-    @Value("${openai.model:gpt-4o}")
-    private String model;
-
-    @Value("${openai.temperature:0.7}")
-    private double temperature;
-
-    @Value("${openai.max.tokens:2000}")
-    private int maxTokens;
 
     @Value("${openai.conversation.max-history:50}")
     private int maxHistorySize;
@@ -40,18 +32,23 @@ public class OpenAIChatService {
 
     private static final int MAX_ITERATIONS = 10;
     private static final String SYSTEM_MESSAGE = 
-            "You are a helpful database assistant. When users ask about database operations, " +
-            "automatically call the appropriate functions to retrieve real data. " +
-            "Format the results clearly and helpfully for the user. " +
-            "Remember previous messages in the conversation and maintain context.";
+            "You are a helpful database assistant. " +
+            "When users tell you personal information (like their name), just acknowledge it and remember it in our conversation - do NOT try to store it in the database. " +
+            "Only call database functions when users specifically ask about data IN the database tables (like listing tables, querying data, etc.). " +
+            "When you do write SQL queries, always use proper syntax with single quotes around strings: WHERE name = 'value'. " +
+            "When presenting database results, format them as clear, readable lists or tables - not as raw JSON descriptions. " +
+            "For example, when listing tables, show table names with their row counts in a simple format. " +
+            "Maintain conversation context across messages.";
 
     // Thread-safe conversation storage
     private final Map<String, ConversationThread> conversations = new ConcurrentHashMap<>();
 
-    public OpenAIChatService(OpenAiService openAiService, FunctionCallHandler functionCallHandler) {
-        this.openAiService = openAiService;
+    public OpenAIChatService(AiChatProvider aiProvider, FunctionCallHandler functionCallHandler) {
+        this.aiProvider = aiProvider;
         this.functionCallHandler = functionCallHandler;
         this.objectMapper = new ObjectMapper();
+        
+        System.out.println("INFO: Chat service initialized with provider: " + aiProvider.getProviderName());
         
         // Start cleanup thread for expired conversations
         startConversationCleanup();
@@ -69,10 +66,9 @@ public class OpenAIChatService {
      * Chat with an existing conversation thread
      */
     public ChatResult chat(String threadId, String userMessage) {
-        if (openAiService == null) {
+        if (aiProvider == null) {
             return new ChatResult(
-                "OpenAI is not configured. Please set the OPENAI_API_KEY environment variable. " +
-                "You can get an API key from https://platform.openai.com/api-keys",
+                "AI provider is not configured. Please configure either OpenAI or Ollama.",
                 threadId
             );
         }
@@ -83,11 +79,11 @@ public class OpenAIChatService {
             thread.updateAccessTime();
 
             // Add user message to conversation history
-            thread.messages.add(new ChatMessage(ChatMessageRole.USER.value(), userMessage));
+            thread.messages.add(new InternalChatMessage("user", userMessage));
 
             // Trim history if it exceeds max size (keep system message + recent messages)
             if (thread.messages.size() > maxHistorySize) {
-                List<ChatMessage> trimmed = new ArrayList<>();
+                List<InternalChatMessage> trimmed = new ArrayList<>();
                 trimmed.add(thread.messages.get(0)); // Keep system message
                 trimmed.addAll(thread.messages.subList(
                     thread.messages.size() - maxHistorySize + 1, 
@@ -97,46 +93,39 @@ public class OpenAIChatService {
                 thread.messages.addAll(trimmed);
             }
 
-            // Build functions in native OpenAI format
-            List<ChatFunction> functions = buildNativeFunctions();
+            // Build function definitions
+            List<FunctionDefinition> functionDefinitions = functionCallHandler.getFunctionDefinitions();
+            
+            // Convert to provider-agnostic format
+            List<AiChatProvider.FunctionDefinition> providerFunctions = functionDefinitions.stream()
+                    .map(f -> new AiChatProvider.FunctionDefinition(f.getName(), f.getDescription(), convertParameters(f.getParameters())))
+                    .collect(Collectors.toList());
 
-            // Use conversation history as messages
-            List<ChatMessage> messages = new ArrayList<>(thread.messages);
+            // Convert thread messages to provider format
+            List<AiChatProvider.ChatMessage> providerMessages = thread.messages.stream()
+                    .map(this::convertToProviderMessage)
+                    .collect(Collectors.toList());
 
             // Execute conversation with automatic function calling
             int iteration = 0;
             while (iteration < MAX_ITERATIONS) {
                 iteration++;
-
-                // Create chat completion request with functions
-                ChatCompletionRequest request = ChatCompletionRequest.builder()
-                        .model(model)
-                        .messages(messages)
-                        .functions(functions)
-                        .temperature(temperature)
-                        .maxTokens(maxTokens)
-                        .build();
-
                 System.out.println("=== Iteration " + iteration + " ===");
                 
-                // Get response from OpenAI
-                ChatCompletionResult result = openAiService.createChatCompletion(request);
-                ChatMessage responseMessage = result.getChoices().get(0).getMessage();
+                // Get response from AI provider
+                ChatResponse response = aiProvider.chat(providerMessages, providerFunctions);
                 
-                // Check if OpenAI wants to call a function
-                ChatFunctionCall functionCall = responseMessage.getFunctionCall();
-                
-                if (functionCall != null) {
-                    // Function call requested
+                // Check if AI wants to call a function
+                if (response.hasFunctionCall()) {
+                    FunctionCall functionCall = response.getFunctionCall();
                     String functionName = functionCall.getName();
-                    Object argumentsObj = functionCall.getArguments();
                     
                     System.out.println("Function call: " + functionName);
-                    System.out.println("Arguments: " + argumentsObj);
+                    System.out.println("Arguments: " + functionCall.getArguments());
                     
                     try {
                         // Parse arguments
-                        Map<String, Object> arguments = parseArguments(argumentsObj);
+                        Map<String, Object> arguments = objectMapper.readValue(functionCall.getArguments(), Map.class);
                         
                         // Execute function
                         Object functionResult = functionCallHandler.executeFunction(functionName, arguments);
@@ -144,16 +133,19 @@ public class OpenAIChatService {
                         
                         System.out.println("Function result: " + resultJson.substring(0, Math.min(200, resultJson.length())) + "...");
                         
-                        // Add assistant message and function result to conversation
-                        messages.add(responseMessage);
-                        thread.messages.add(responseMessage);
+                        // Add assistant message with function call
+                        AiChatProvider.ChatMessage assistantMsg = new AiChatProvider.ChatMessage("assistant", response.getContent());
+                        assistantMsg.setFunctionCall(functionCall);
+                        providerMessages.add(assistantMsg);
+                        thread.messages.add(convertFromProviderMessage(assistantMsg));
                         
-                        ChatMessage functionResultMessage = new ChatMessage(ChatMessageRole.FUNCTION.value(), resultJson);
-                        functionResultMessage.setName(functionName);
-                        messages.add(functionResultMessage);
-                        thread.messages.add(functionResultMessage);
+                        // Add function result
+                        AiChatProvider.ChatMessage functionResultMsg = new AiChatProvider.ChatMessage("function", resultJson);
+                        functionResultMsg.setName(functionName);
+                        providerMessages.add(functionResultMsg);
+                        thread.messages.add(convertFromProviderMessage(functionResultMsg));
                         
-                        // Continue loop to let OpenAI process the result
+                        // Continue loop to let AI process the result
                         continue;
                         
                     } catch (Exception e) {
@@ -161,24 +153,27 @@ public class OpenAIChatService {
                         e.printStackTrace();
                         
                         // Add error as function result
-                        messages.add(responseMessage);
-                        thread.messages.add(responseMessage);
+                        AiChatProvider.ChatMessage assistantMsg = new AiChatProvider.ChatMessage("assistant", null);
+                        assistantMsg.setFunctionCall(functionCall);
+                        providerMessages.add(assistantMsg);
+                        thread.messages.add(convertFromProviderMessage(assistantMsg));
                         
-                        ChatMessage errorMessage = new ChatMessage(ChatMessageRole.FUNCTION.value(), 
+                        AiChatProvider.ChatMessage errorMsg = new AiChatProvider.ChatMessage("function", 
                                 "{\"error\": \"" + e.getMessage().replace("\"", "\\\"") + "\"}");
-                        errorMessage.setName(functionName);
-                        messages.add(errorMessage);
-                        thread.messages.add(errorMessage);
+                        errorMsg.setName(functionName);
+                        providerMessages.add(errorMsg);
+                        thread.messages.add(convertFromProviderMessage(errorMsg));
                         continue;
                     }
                 }
                 
                 // No function call - return the final response
-                String content = responseMessage.getContent();
+                String content = response.getContent();
                 System.out.println("Final response: " + (content != null ? content.substring(0, Math.min(100, content.length())) : "null"));
                 
                 // Add final assistant response to thread history
-                thread.messages.add(responseMessage);
+                AiChatProvider.ChatMessage finalMsg = new AiChatProvider.ChatMessage("assistant", content);
+                thread.messages.add(convertFromProviderMessage(finalMsg));
                 
                 return new ChatResult(content != null ? content : "No response from AI", threadId);
             }
@@ -192,48 +187,70 @@ public class OpenAIChatService {
         }
     }
 
-    private List<ChatFunction> buildNativeFunctions() {
-        List<FunctionDefinition> functionDefinitions = functionCallHandler.getFunctionDefinitions();
-        List<ChatFunction> chatFunctions = new ArrayList<>();
-        
-        for (FunctionDefinition funcDef : functionDefinitions) {
-            try {
-                // Convert our FunctionDefinition to OpenAI's ChatFunction format
-                // The library expects the parameters as a Map or Class
-                ChatFunction chatFunction = ChatFunction.builder()
-                        .name(funcDef.getName())
-                        .description(funcDef.getDescription())
-                        .executor(Object.class, obj -> {
-                            // This executor won't be used since we handle execution manually
-                            return null;
-                        })
-                        .build();
-                chatFunctions.add(chatFunction);
-            } catch (Exception e) {
-                System.err.println("Error building function " + funcDef.getName() + ": " + e.getMessage());
-            }
+    /**
+     * Convert internal message to provider message format
+     */
+    private AiChatProvider.ChatMessage convertToProviderMessage(InternalChatMessage msg) {
+        AiChatProvider.ChatMessage providerMsg = new AiChatProvider.ChatMessage(msg.role, msg.content);
+        providerMsg.setName(msg.name);
+        if (msg.functionCall != null) {
+            providerMsg.setFunctionCall(new FunctionCall(msg.functionCall.name, msg.functionCall.arguments));
         }
-        
-        return chatFunctions;
+        return providerMsg;
     }
 
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> parseArguments(Object argumentsObj) throws Exception {
-        if (argumentsObj instanceof String) {
-            return objectMapper.readValue((String) argumentsObj, Map.class);
-        } else if (argumentsObj instanceof Map) {
-            return (Map<String, Object>) argumentsObj;
-        } else {
-            return objectMapper.convertValue(argumentsObj, Map.class);
+    /**
+     * Convert provider message to internal message format
+     */
+    private InternalChatMessage convertFromProviderMessage(AiChatProvider.ChatMessage msg) {
+        InternalChatMessage internalMsg = new InternalChatMessage(msg.getRole(), msg.getContent());
+        internalMsg.name = msg.getName();
+        if (msg.getFunctionCall() != null) {
+            internalMsg.functionCall = new InternalFunctionCall(
+                    msg.getFunctionCall().getName(), 
+                    msg.getFunctionCall().getArguments()
+            );
+        }
+        return internalMsg;
+    }
+
+    /**
+     * Internal message structure for conversation history
+     */
+    private static class InternalChatMessage {
+        String role;
+        String content;
+        String name;
+        InternalFunctionCall functionCall;
+
+        InternalChatMessage(String role, String content) {
+            this.role = role;
+            this.content = content;
+        }
+    }
+
+    /**
+     * Internal function call structure
+     */
+    private static class InternalFunctionCall {
+        String name;
+        String arguments;
+
+        InternalFunctionCall(String name, String arguments) {
+            this.name = name;
+            this.arguments = arguments;
         }
     }
 
     /**
      * Get conversation history for a thread
      */
-    public List<ChatMessage> getConversationHistory(String threadId) {
+    public List<AiChatProvider.ChatMessage> getConversationHistory(String threadId) {
         ConversationThread thread = conversations.get(threadId);
-        return thread != null ? new ArrayList<>(thread.messages) : new ArrayList<>();
+        if (thread == null) return new ArrayList<>();
+        return thread.messages.stream()
+                .map(this::convertToProviderMessage)
+                .collect(Collectors.toList());
     }
 
     /**
@@ -257,9 +274,20 @@ public class OpenAIChatService {
         return conversations.computeIfAbsent(threadId, id -> {
             ConversationThread thread = new ConversationThread(id);
             // Add system message to new conversations
-            thread.messages.add(new ChatMessage(ChatMessageRole.SYSTEM.value(), SYSTEM_MESSAGE));
+            thread.messages.add(new InternalChatMessage("system", SYSTEM_MESSAGE));
             return thread;
         });
+    }
+
+    /**
+     * Convert function parameters to Map format
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> convertParameters(Object params) {
+        if (params instanceof Map) {
+            return (Map<String, Object>) params;
+        }
+        return objectMapper.convertValue(params, Map.class);
     }
 
     /**
@@ -296,7 +324,7 @@ public class OpenAIChatService {
      */
     private static class ConversationThread {
         final String threadId;
-        final List<ChatMessage> messages;
+        final List<InternalChatMessage> messages;
         long lastAccessTime;
 
         ConversationThread(String threadId) {
