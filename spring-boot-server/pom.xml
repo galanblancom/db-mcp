@@ -8,7 +8,7 @@
 		<version>3.2.3</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.javamcp</groupId>
+	<groupId>com.indra-rd</groupId>
 	<artifactId>db-mcp</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>db-mcp</name>
