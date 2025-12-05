@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class McpToolService {
@@ -143,5 +144,123 @@ public class McpToolService {
     @Tool(description = "Compares the structure of two tables (same table in different schemas or different tables). Returns differences in columns, types, and constraints.")
     public SchemaComparisonResult compareSchemas(String table1, String schema1, String table2, String schema2) throws Exception {
         return databaseService.compareSchemas(table1, schema1, table2, schema2);
+    }
+
+    // Custom database analysis tools
+    @Tool(description = "Get a comprehensive summary of the database including total tables and basic statistics")
+    public Map<String, Object> getDatabaseSummary() throws Exception {
+        List<TableListItem> tables = databaseService.listTables(null, null);
+        
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("totalTables", tables.size());
+        summary.put("timestamp", System.currentTimeMillis());
+        summary.put("success", true);
+        
+        return summary;
+    }
+
+    @Tool(description = "Search for tables matching a specific name pattern. Use % as wildcard (e.g., 'USER_%' or '%_HISTORY')")
+    public Map<String, Object> searchTablesByPattern(String pattern) throws Exception {
+        if (pattern == null || pattern.trim().isEmpty()) {
+            pattern = "%";
+        }
+        
+        List<TableListItem> tables = databaseService.listTables(null, pattern);
+        
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("pattern", pattern);
+        result.put("matchingTables", tables.size());
+        result.put("tables", tables);
+        
+        return result;
+    }
+
+    @Tool(description = "Get comprehensive statistics for a specific table including row count, column count, and column details")
+    public Map<String, Object> getTableStatisticsSummary(String tableName, String schema) throws Exception {
+        if (tableName == null || tableName.trim().isEmpty()) {
+            Map<String, Object> error = new HashMap<>();
+            error.put("success", false);
+            error.put("error", "Table name is required");
+            return error;
+        }
+        
+        TableInfo tableInfo = databaseService.getTableInfo(tableName, schema);
+        
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("success", true);
+        stats.put("tableName", tableName);
+        stats.put("schema", schema);
+        stats.put("rowCount", tableInfo.getRowCount());
+        stats.put("columnCount", tableInfo.getColumns() != null ? tableInfo.getColumns().size() : 0);
+        stats.put("columns", tableInfo.getColumns());
+        
+        return stats;
+    }
+
+    @Tool(description = "Compare row counts between two tables to identify data discrepancies or synchronization issues")
+    public Map<String, Object> compareTableRowCounts(String table1, String table2, String schema) throws Exception {
+        if (table1 == null || table2 == null || table1.trim().isEmpty() || table2.trim().isEmpty()) {
+            Map<String, Object> error = new HashMap<>();
+            error.put("success", false);
+            error.put("error", "Both table names are required");
+            return error;
+        }
+        
+        TableInfo info1 = databaseService.getTableInfo(table1, schema);
+        TableInfo info2 = databaseService.getTableInfo(table2, schema);
+        
+        Map<String, Object> comparison = new HashMap<>();
+        comparison.put("success", true);
+        comparison.put("table1", Map.of("name", table1, "rowCount", info1.getRowCount()));
+        comparison.put("table2", Map.of("name", table2, "rowCount", info2.getRowCount()));
+        comparison.put("difference", Math.abs(info1.getRowCount() - info2.getRowCount()));
+        comparison.put("schema", schema);
+        
+        return comparison;
+    }
+
+    @Tool(description = "Find tables with row count greater than or equal to the specified minimum rows. Default minimum is 1000 rows.")
+    public Map<String, Object> findLargeTables(Long minRows) throws Exception {
+        if (minRows == null) {
+            minRows = 1000L;
+        }
+        
+        List<TableListItem> allTables = databaseService.listTables(null, null);
+        final Long threshold = minRows;
+        List<TableListItem> largeTables = allTables.stream()
+            .filter(t -> t.getRowCount() >= threshold)
+            .collect(java.util.stream.Collectors.toList());
+        
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("minRows", threshold);
+        result.put("totalTables", allTables.size());
+        result.put("largeTablesCount", largeTables.size());
+        result.put("largeTables", largeTables);
+        
+        return result;
+    }
+
+    @Tool(description = "Get invoices to pay by contract NIC. Returns pending invoices with due date, invoice number, and debt amount for a specific contract. Optional maxRows parameter (default: 1000).")
+    public QueryResult getInvoicesToPayByContract(List<String> nics, Integer maxRows) throws Exception {
+        if (nics == null || nics.isEmpty()) {
+            throw new IllegalArgumentException("NICs parameter is required");
+        }
+        
+        int limit = maxRows != null ? maxRows : 1000;
+        
+        String query = "SELECT NIC, F_VCTO_FAC, SIMBOLO_VAR, " +
+            "RECIBOS.IMP_TOT_REC - RECIBOS.IMP_CTA - ( " +
+            "    SELECT NVL(SUM(CTI.IMP_COB_BCO),0) FROM COBTEMP CTI " +
+            "    WHERE CTI.IND_PROC = '2' AND CTI.TIP_COBRO IN ('CB001', 'CB002') " +
+            "    AND CTI.SIMBOLO_VAR = RECIBOS.SIMBOLO_VAR " +
+            ") AS DEUDA " +
+            "FROM RECIBOS WHERE RECIBOS.NIC IN (" + nics.stream().map(nic -> "'" + nic + "'").collect(Collectors.joining(", ")) + ") " +
+            "AND RECIBOS.IMP_TOT_REC > RECIBOS.IMP_CTA " +
+            "AND INSTR((SELECT RTRIM(XMLAGG(XMLELEMENT(E,EST_REC,',').EXTRACT('//text()') ORDER BY EST_REC).GETCLOBVAL(),',') " +
+            "FROM GRUPO_EST WHERE CO_GRUPO = 'GE116' OR CO_GRUPO = 'GE118'),RECIBOS.EST_ACT) <> 0";
+        
+        return databaseService.executeQuery(query, limit, false);
     }
 }

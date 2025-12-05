@@ -38,7 +38,9 @@ public class AIChatService {
             "When you do write SQL queries, always use proper syntax with single quotes around strings: WHERE name = 'value'. " +
             "When presenting database results, format them as clear, readable lists or tables - not as raw JSON descriptions. " +
             "For example, when listing tables, show table names with their row counts in a simple format. " +
-            "Maintain conversation context across messages.";
+            "Maintain conversation context across messages. " +
+            "IMPORTANT: When calling functions, always use the exact parameter names as defined in camelCase format (e.g., contractNic, tableName, maxRows). Never convert parameter names to snake_case or change their capitalization. " +
+            "CRITICAL: When a user asks to reformat, summarize, or transform previous results (e.g., 'format as HTML', 'make it a table', 'summarize that'), DO NOT call the function again. Instead, use the data from the previous function result that is already in the conversation history. Only call functions when NEW data is needed from the database.";
 
     // Thread-safe conversation storage
     private final Map<String, ConversationThread> conversations = new ConcurrentHashMap<>();
@@ -134,11 +136,13 @@ public class AIChatService {
                         System.out.println("Function result: " + resultJson + "...");
                         
                         // Add assistant message with function call
-                        AIChatProvider.ChatMessage assistantMsg = new AIChatProvider.ChatMessage("assistant", response.getContent());
-                        assistantMsg.setFunctionCall(functionCall);
-                        providerMessages.add(assistantMsg);
-                        thread.messages.add(convertFromProviderMessage(assistantMsg));
-                        
+                        if (response.getContent() != null && !response.getContent().isEmpty()) {
+                            AIChatProvider.ChatMessage assistantMsg = new AIChatProvider.ChatMessage("assistant", response.getContent());
+                            assistantMsg.setFunctionCall(functionCall);
+                            providerMessages.add(assistantMsg);
+                            thread.messages.add(convertFromProviderMessage(assistantMsg));
+                        }
+
                         // Add function result
                         AIChatProvider.ChatMessage functionResultMsg = new AIChatProvider.ChatMessage("function", resultJson);
                         functionResultMsg.setName(functionName);
@@ -158,8 +162,15 @@ public class AIChatService {
                         providerMessages.add(assistantMsg);
                         thread.messages.add(convertFromProviderMessage(assistantMsg));
                         
+                        // Get error message safely
+                        String errorMessage = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                        if (e.getCause() != null && e.getCause().getMessage() != null) {
+                            errorMessage += ": " + e.getCause().getMessage();
+                        }
+                        errorMessage = errorMessage.replace("\"", "\\\"").replace("\n", " ");
+                        
                         AIChatProvider.ChatMessage errorMsg = new AIChatProvider.ChatMessage("function", 
-                                "{\"error\": \"" + e.getMessage().replace("\"", "\\\"") + "\"}");
+                                "{\"error\": \"" + errorMessage + "\"}");
                         errorMsg.setName(functionName);
                         providerMessages.add(errorMsg);
                         thread.messages.add(convertFromProviderMessage(errorMsg));
