@@ -21,14 +21,21 @@ public class McpToolService {
     private final QueryLogger queryLogger;
     private final UptimeTracker uptimeTracker;
     private final QueryTemplates queryTemplates;
+    private final ExportCacheService exportCacheService;
+    
+    // Store last executed query for export functionality
+    private String lastExecutedQuery = null;
+    private List<String> lastQueryNics = null;
 
     @Autowired
     public McpToolService(DatabaseService databaseService, QueryLogger queryLogger, 
-                         UptimeTracker uptimeTracker, QueryTemplates queryTemplates) {
+                         UptimeTracker uptimeTracker, QueryTemplates queryTemplates,
+                         ExportCacheService exportCacheService) {
         this.databaseService = databaseService;
         this.queryLogger = queryLogger;
         this.uptimeTracker = uptimeTracker;
         this.queryTemplates = queryTemplates;
+        this.exportCacheService = exportCacheService;
     }
 
     @Tool(description = "Executes a SELECT or WITH query against the database and returns the results.")
@@ -38,12 +45,12 @@ public class McpToolService {
         return databaseService.executeQuery(request.getSql(), maxRows, excludeLarge);
     }
 
-    @Tool(description = "Lists all tables accessible by the current user with row counts.")
+    @Tool(description = "Lists all SQL database tables accessible by the current user with row counts. ONLY use for SQL database tables, NOT for CSV files or ChromaDB file content.")
     public List<TableListItem> listTables(String schema, String pattern) throws Exception {
         return databaseService.listTables(schema, pattern);
     }
 
-    @Tool(description = "Retrieves detailed information about a table including columns, data types, constraints, primary keys, and foreign keys.")
+    @Tool(description = "Retrieves detailed information about a SQL database table including columns, data types, constraints, primary keys, and foreign keys. ONLY use for SQL database tables, NOT for CSV files or ChromaDB file content.")
     public TableInfo getTableInfo(String tableName, String schema) throws Exception {
         return databaseService.getTableInfo(tableName, schema);
     }
@@ -135,7 +142,7 @@ public class McpToolService {
         return queryTemplates.list();
     }
 
-    @Tool(description = "Executes a pre-defined query template by ID with parameter substitution.")
+    @Tool(description = "Executes a pre-defined SQL query template by ID with parameter substitution. ONLY use for SQL database queries, NOT for file content or ChromaDB files.")
     public QueryResult executeTemplate(String templateId, Map<String, String> parameters) throws Exception {
         String sql = queryTemplates.execute(templateId, parameters);
         return databaseService.executeQuery(sql, 1000, false);
@@ -147,7 +154,7 @@ public class McpToolService {
     }
 
     // Custom database analysis tools
-    @Tool(description = "Get a comprehensive summary of the database including total tables and basic statistics")
+    @Tool(description = "Get a comprehensive summary of the SQL database including total tables and basic statistics. ONLY use for SQL database questions, NOT for file content or ChromaDB files.")
     public Map<String, Object> getDatabaseSummary() throws Exception {
         List<TableListItem> tables = databaseService.listTables(null, null);
         
@@ -176,7 +183,7 @@ public class McpToolService {
         return result;
     }
 
-    @Tool(description = "Get comprehensive statistics for a specific table including row count, column count, and column details")
+    @Tool(description = "Get comprehensive statistics for a specific SQL database table including row count, column count, and column details. ONLY use for actual database tables, NOT for CSV files or file content from ChromaDB.")
     public Map<String, Object> getTableStatisticsSummary(String tableName, String schema) throws Exception {
         if (tableName == null || tableName.trim().isEmpty()) {
             Map<String, Object> error = new HashMap<>();
@@ -242,10 +249,10 @@ public class McpToolService {
         return result;
     }
 
-    @Tool(description = "Get invoices to pay by contract NIC. Returns pending invoices with due date, invoice number, and debt amount for a specific contract. Optional maxRows parameter (default: 1000).")
+    @Tool(description = "Get pending invoices (facturas por pagar) for one or more contract NICs. Use this when user asks about 'facturas por pagar', 'pending invoices', 'deudas', or 'invoices to pay'. Returns invoices with due date (F_VCTO_FAC), invoice number (SIMBOLO_VAR), and debt amount (DEUDA). Parameters: nics (required, list of contract numbers), maxRows (optional, default 1000). Example: nics=['12345', '67890']")
     public QueryResult getInvoicesToPayByContract(List<String> nics, Integer maxRows) throws Exception {
         if (nics == null || nics.isEmpty()) {
-            throw new IllegalArgumentException("NICs parameter is required");
+            throw new IllegalArgumentException("NICs parameter is required. Please provide at least one contract NIC number.");
         }
         
         int limit = maxRows != null ? maxRows : 1000;
@@ -261,6 +268,121 @@ public class McpToolService {
             "AND INSTR((SELECT RTRIM(XMLAGG(XMLELEMENT(E,EST_REC,',').EXTRACT('//text()') ORDER BY EST_REC).GETCLOBVAL(),',') " +
             "FROM GRUPO_EST WHERE CO_GRUPO = 'GE116' OR CO_GRUPO = 'GE118'),RECIBOS.EST_ACT) <> 0";
         
+        // Store for potential export
+        this.lastExecutedQuery = query;
+        this.lastQueryNics = nics;
+        
         return databaseService.executeQuery(query, limit, false);
+    }
+
+    // ==================== FILE EXPORT TOOLS ====================
+
+    @Tool(description = "Export the last query results to CSV/Excel format. Use this after running any query (getInvoicesToPayByContract, runQuery, etc.) when user asks to 'export to Excel', 'download as CSV', or 'save the results'. Automatically uses the last executed query.")
+    public Map<String, Object> exportLastQueryToCsv(String title, Integer maxRows) throws Exception {
+        if (lastExecutedQuery == null) {
+            throw new IllegalArgumentException("No query has been executed yet. Please run a query first before exporting.");
+        }
+        
+        // Execute the last query again to get fresh data
+        int rows = maxRows != null ? maxRows : 10000;
+        QueryResult result = databaseService.executeQuery(lastExecutedQuery, rows, false);
+        
+        String fileName = title != null ? title : "export";
+        
+        // Cache the result and get a download ID
+        String exportId = exportCacheService.cacheExport(lastExecutedQuery, fileName, result);
+        String downloadUrl = "http://localhost:8081/api/export/download-csv/" + exportId;
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("action", "export_to_csv");
+        response.put("fileName", fileName + ".csv");
+        response.put("rowsExported", result.getRows().size());
+        response.put("columns", result.getColumns());
+        response.put("downloadUrl", downloadUrl);
+        response.put("exportId", exportId);
+        response.put("message", String.format("✅ Export ready! '%s.csv' with %d rows. Download: %s",
+            fileName, result.getRows().size(), downloadUrl));
+        
+        return response;
+    }
+
+    @Tool(description = "Export table data directly to CSV/Excel. Specify the table name and optionally schema and maxRows (default: 10000). Returns download information. Use when user asks to 'export the [table] table', 'download users table', etc.")
+    public Map<String, Object> exportTableToCsv(String tableName, String schema, Integer maxRows) throws Exception {
+        if (tableName == null || tableName.trim().isEmpty()) {
+            throw new IllegalArgumentException("tableName is required");
+        }
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("action", "export_table");
+        response.put("tableName", tableName);
+        response.put("schema", schema);
+        response.put("maxRows", maxRows != null ? maxRows : 10000);
+        
+        // Build the export URL for the frontend to call
+        String exportUrl = "/api/export/table-to-csv?table=" + tableName;
+        if (schema != null) {
+            exportUrl += "&schema=" + schema;
+        }
+        exportUrl += "&maxRows=" + (maxRows != null ? maxRows : 10000);
+        
+        response.put("exportUrl", exportUrl);
+        response.put("message", "Table '" + tableName + "' can be exported via: GET " + exportUrl);
+        response.put("instructions", "Call this endpoint to download the CSV file with " + (maxRows != null ? maxRows : 10000) + " rows maximum");
+        
+        return response;
+    }
+
+    @Tool(description = "Export custom SQL query results to CSV/Excel. Provide the SQL SELECT query, optional title, and maxRows (default: 10000). Use when user asks to 'export the results of [query]' or 'save this query to Excel'.")
+    public Map<String, Object> exportQueryToCsv(String sql, String title, Integer maxRows) throws Exception {
+        if (sql == null || sql.trim().isEmpty()) {
+            throw new IllegalArgumentException("sql query is required");
+        }
+
+        if (!sql.trim().toUpperCase().startsWith("SELECT") && !sql.trim().toUpperCase().startsWith("WITH")) {
+            throw new IllegalArgumentException("Only SELECT and WITH queries are allowed for export");
+        }
+
+        // Execute the query to get the actual data
+        int rows = maxRows != null ? maxRows : 10000;
+        QueryResult result = databaseService.executeQuery(sql, rows, false);
+        
+        String fileName = title != null ? title : "export";
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("action", "export_to_csv");
+        response.put("fileName", fileName + ".csv");
+        response.put("rowsExported", result.getRows().size());
+        response.put("columns", result.getColumns());
+        response.put("downloadEndpoint", "/api/export/query-to-csv");
+        response.put("message", String.format("Successfully prepared CSV export '%s.csv' with %d rows and %d columns. " +
+            "To download, make a POST request to /api/export/query-to-csv with the SQL query in the body.",
+            fileName, result.getRows().size(), result.getColumns().size()));
+        
+        return response;
+    }
+
+    @Tool(description = "Export query results to PDF report. Provide SQL SELECT query, optional title, and maxRows (default: 1000, PDFs work best with smaller datasets). Use when user asks for a 'PDF report', 'print-friendly version', or 'formatted report'.")
+    public Map<String, Object> exportQueryToPdf(String sql, String title, Integer maxRows) throws Exception {
+        if (sql == null || sql.trim().isEmpty()) {
+            throw new IllegalArgumentException("sql query is required");
+        }
+
+        if (!sql.trim().toUpperCase().startsWith("SELECT")) {
+            throw new IllegalArgumentException("Only SELECT queries are allowed for export");
+        }
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("action", "export_to_pdf");
+        response.put("sql", sql);
+        response.put("title", title != null ? title : "Query Results Report");
+        response.put("maxRows", maxRows != null ? maxRows : 1000);
+        response.put("endpoint", "POST /api/export/query-to-pdf");
+        response.put("message", "Query results can be exported to PDF by calling POST /api/export/query-to-pdf");
+        response.put("instructions", "Send POST request with JSON body: { \"sql\": \"" + sql + "\", \"title\": \"" + (title != null ? title : "Query Results") + "\", \"maxRows\": " + (maxRows != null ? maxRows : 1000) + " }");
+        response.put("note", "PDF exports work best with up to 1000 rows for readability");
+        
+        return response;
     }
 }

@@ -6,6 +6,8 @@ import com.indrard.dbmcp.service.ai.AIChatProvider.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.context.MessageSource;
+import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -23,6 +25,7 @@ public class AIChatService {
     private final AIChatProvider aiProvider;
     private final FunctionCallHandler functionCallHandler;
     private final ObjectMapper objectMapper;
+    private final MessageSource messageSource;
 
     @Value("${openai.conversation.max-history:50}")
     private int maxHistorySize;
@@ -31,24 +34,15 @@ public class AIChatService {
     private long conversationTimeoutMinutes;
 
     private static final int MAX_ITERATIONS = 10;
-    private static final String SYSTEM_MESSAGE = 
-            "You are a helpful database assistant. " +
-            "When users tell you personal information (like their name), just acknowledge it and remember it in our conversation - do NOT try to store it in the database. " +
-            "Only call database functions when users specifically ask about data IN the database tables (like listing tables, querying data, etc.). " +
-            "When you do write SQL queries, always use proper syntax with single quotes around strings: WHERE name = 'value'. " +
-            "When presenting database results, format them as clear, readable lists or tables - not as raw JSON descriptions. " +
-            "For example, when listing tables, show table names with their row counts in a simple format. " +
-            "Maintain conversation context across messages. " +
-            "IMPORTANT: When calling functions, always use the exact parameter names as defined in camelCase format (e.g., contractNic, tableName, maxRows). Never convert parameter names to snake_case or change their capitalization. " +
-            "CRITICAL: When a user asks to reformat, summarize, or transform previous results (e.g., 'format as HTML', 'make it a table', 'summarize that'), DO NOT call the function again. Instead, use the data from the previous function result that is already in the conversation history. Only call functions when NEW data is needed from the database.";
 
     // Thread-safe conversation storage
     private final Map<String, ConversationThread> conversations = new ConcurrentHashMap<>();
 
-    public AIChatService(AIChatProvider aiProvider, FunctionCallHandler functionCallHandler) {
+    public AIChatService(AIChatProvider aiProvider, FunctionCallHandler functionCallHandler, MessageSource messageSource) {
         this.aiProvider = aiProvider;
         this.functionCallHandler = functionCallHandler;
         this.objectMapper = new ObjectMapper();
+        this.messageSource = messageSource;
         
         System.out.println("INFO: Chat service initialized with provider: " + aiProvider.getProviderName());
         
@@ -285,7 +279,8 @@ public class AIChatService {
         return conversations.computeIfAbsent(threadId, id -> {
             ConversationThread thread = new ConversationThread(id);
             // Add system message to new conversations
-            thread.messages.add(new InternalChatMessage("system", SYSTEM_MESSAGE));
+            String localizedSystemMessage = messageSource.getMessage("ai.system.message", null, LocaleContextHolder.getLocale());
+            thread.messages.add(new InternalChatMessage("system", localizedSystemMessage));
             return thread;
         });
     }

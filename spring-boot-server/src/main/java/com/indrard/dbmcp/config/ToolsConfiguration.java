@@ -3,6 +3,7 @@ package com.indrard.dbmcp.config;
 import com.indrard.dbmcp.model.*;
 import com.indrard.dbmcp.model.request.QueryRequest;
 import com.indrard.dbmcp.service.McpToolService;
+import com.indrard.dbmcp.service.SemanticFolderService;
 import com.indrard.dbmcp.service.function.ToolDefinition;
 import com.indrard.dbmcp.service.function.ToolParameter;
 import com.indrard.dbmcp.util.QueryLogger;
@@ -26,9 +27,11 @@ import java.util.Map;
 public class ToolsConfiguration {
 
     private final McpToolService mcpToolService;
+    private final SemanticFolderService semanticFolderService;
 
-    public ToolsConfiguration(McpToolService mcpToolService) {
+    public ToolsConfiguration(McpToolService mcpToolService, SemanticFolderService semanticFolderService) {
         this.mcpToolService = mcpToolService;
+        this.semanticFolderService = semanticFolderService;
     }
 
     @ToolDefinition(
@@ -336,53 +339,141 @@ public class ToolsConfiguration {
         description = "Get invoices to pay by contract. Returns pending invoices with due date, invoice number, and debt amount for one or more contract NICs. Present each invoice with its due date, invoice number (SIMBOLO_VAR), and debt amount in a clear, easy-to-read format. Highlight overdue invoices if applicable.",
         priority = 100
     )
-    public String getInvoicesToPayByContract(
+    public Map<String, Object> getInvoicesToPayByContract(
         @ToolParameter(name = "nics", description = "Array of contract NIC identifiers to query", required = true, type = "array") List<String> nics,
         @ToolParameter(name = "maxRows", description = "Maximum number of rows to return (default: 1000)", type = "integer") Integer maxRows
     ) throws Exception {
         QueryResult result = mcpToolService.getInvoicesToPayByContract(nics, maxRows);
 
-        // Prepare summary data
-        String prompt = "Eres un asistente financiero que debe responder con precisión sobre facturas pendientes.\n\n";
-        prompt += "DATOS VERIFICADOS:\n";
-        prompt += "- Total de facturas pendientes: " + result.getRows().size() + "\n";
-        prompt += String.format("- Deuda total acumulada: $%.2f\n\n", 
-                result.getRows().stream()
-                      .mapToDouble(row -> {
-                          Object deudaObj = row.get("DEUDA");
-                          if (deudaObj instanceof Number) {
-                              return ((Number) deudaObj).doubleValue();
-                          }
-                          return 0;
-                      }).sum()
-        );
-        prompt += "Detalle de cada factura:\n";
-        
-        List<String> summaryData = new java.util.ArrayList<>();
-        double totalDebt = 0;
-        int index = 1;
-        for (Map<String, Object> row : result.getRows()) {
-            String nic = row.getOrDefault("NIC", "N/A").toString();
-            String dueDate = row.getOrDefault("F_VCTO_FAC", "N/A").toString();
-            String symbol = row.getOrDefault("SIMBOLO_VAR", "N/A").toString();
-            double debt = 0;
-            Object debtObj = row.get("DEUDA");
-            if (debtObj instanceof Number) {
-                debt = ((Number) debtObj).doubleValue();
-            }
-            totalDebt += debt;
-            summaryData.add(String.format("Factura %d: NIC %s, Vence: %s, Símbolo: %s, Deuda: $%.2f",
-                    index++, nic, dueDate, symbol, debt));
-        }
+        // Calculate summary statistics
+        double totalDebt = result.getRows().stream()
+            .mapToDouble(row -> {
+                Object deudaObj = row.get("DEUDA");
+                if (deudaObj instanceof Number) {
+                    return ((Number) deudaObj).doubleValue();
+                }
+                return 0;
+            }).sum();
 
-        prompt += String.join("\n", summaryData) + "\n";
-        prompt += "\nINSTRUCCIONES ESTRICTAS:\n";
-        prompt += "1. Usa EXACTAMENTE los números que te proporciono arriba\n";
-        prompt += "2. Responde en máximo 4 líneas\n";
-        prompt += "3. No inventes ni calcules nada adicional\n";
-        prompt += "4. Utiliza la palabra debe, en vez de debo\n";
-        prompt += "5. Utiliza respuestas directas, no expongas tu razonamiento\n";
+        // Build the SQL query used (for potential export)
+        String sqlQuery = "SELECT NIC, F_VCTO_FAC, SIMBOLO_VAR, " +
+            "RECIBOS.IMP_TOT_REC - RECIBOS.IMP_CTA - ( " +
+            "    SELECT NVL(SUM(CTI.IMP_COB_BCO),0) FROM COBTEMP CTI " +
+            "    WHERE CTI.IND_PROC = '2' AND CTI.TIP_COBRO IN ('CB001', 'CB002') " +
+            "    AND CTI.SIMBOLO_VAR = RECIBOS.SIMBOLO_VAR " +
+            ") AS DEUDA " +
+            "FROM RECIBOS WHERE RECIBOS.NIC IN (" + 
+            nics.stream().map(nic -> "'" + nic + "'").collect(java.util.stream.Collectors.joining(", ")) + 
+            ") AND RECIBOS.IMP_TOT_REC > RECIBOS.IMP_CTA " +
+            "AND INSTR((SELECT RTRIM(XMLAGG(XMLELEMENT(E,EST_REC,',').EXTRACT('//text()') ORDER BY EST_REC).GETCLOBVAL(),',') " +
+            "FROM GRUPO_EST WHERE CO_GRUPO = 'GE116' OR CO_GRUPO = 'GE118'),RECIBOS.EST_ACT) <> 0";
 
-        return prompt;
+        // Prepare structured response
+        Map<String, Object> response = new java.util.HashMap<>();
+        response.put("totalInvoices", result.getRows().size());
+        response.put("totalDebt", totalDebt);
+        response.put("invoices", result.getRows());
+        response.put("sqlQuery", sqlQuery);  // Include SQL for potential export
+        response.put("summary", String.format("Found %d pending invoices for contract(s) %s with total debt of $%.2f", 
+            result.getRows().size(), 
+            String.join(", ", nics), 
+            totalDebt));
+
+        return response;
+    }
+
+    @ToolDefinition(
+        name = "indexFolderForSemanticSearch",
+        description = "Index a folder's contents into a vector database for semantic search. This allows you to find files based on their meaning, not just keywords. Use this before searching files semantically.",
+        priority = 90
+    )
+    public String indexFolderForSemanticSearch(
+        @ToolParameter(name = "folderPath", description = "Path to folder to index for semantic search", required = true, type = "string") String folderPath
+    ) {
+        return semanticFolderService.indexFolder(folderPath);
+    }
+
+    @ToolDefinition(
+        name = "searchFilesBySemantic",
+        description = "Search indexed files using semantic similarity. Find files by describing what you're looking for (e.g., 'database connection', 'error handling', 'REST API'). Must index folder first.",
+        priority = 90
+    )
+    public String searchFilesBySemantic(
+        @ToolParameter(name = "query", description = "What you're looking for described in natural language", required = true, type = "string") String query,
+        @ToolParameter(name = "limit", description = "Maximum number of results to return (default: 5)", type = "integer") Integer limit
+    ) {
+        int resultLimit = limit != null ? limit : 5;
+        return semanticFolderService.searchFiles(query, resultLimit);
+    }
+
+    @ToolDefinition(
+        name = "getVectorStoreStats",
+        description = "Get statistics about the semantic search index (how many files are indexed, collection status, etc.)",
+        priority = 90
+    )
+    public String getVectorStoreStats() {
+        return semanticFolderService.getIndexStats();
+    }
+
+    @ToolDefinition(
+        name = "clearVectorStore",
+        description = "Clear all indexed files from the semantic search vector store. Use this to start fresh or free up space.",
+        priority = 90
+    )
+    public String clearVectorStore() {
+        return semanticFolderService.clearIndex();
+    }
+
+    // ==================== EXPORT TOOLS ====================
+
+    @ToolDefinition(
+        name = "exportLastQueryToCsv",
+        description = "[PRIMARY EXPORT TOOL] Export the last query results to CSV/Excel. Use this whenever user asks to 'export', 'download', or 'save' data. Automatically uses the last query - NO SQL needed. Only requires a title parameter. Example: exportLastQueryToCsv(title='facturas'). This is the DEFAULT choice for all exports.",
+        priority = 90
+    )
+    public Map<String, Object> exportLastQueryToCsv(
+        @ToolParameter(name = "title", description = "Title for the exported file (default: 'query_export')", type = "string") String title,
+        @ToolParameter(name = "maxRows", description = "Maximum number of rows to export (default: 10000)", type = "integer") Integer maxRows
+    ) throws Exception {
+        return mcpToolService.exportLastQueryToCsv(title, maxRows);
+    }
+
+    @ToolDefinition(
+        name = "exportTableToCsv",
+        description = "Export entire table data to CSV/Excel format. Use when user asks to 'export the [table] table', 'download users table', etc. Returns download information.",
+        priority = 80
+    )
+    public Map<String, Object> exportTableToCsv(
+        @ToolParameter(name = "tableName", description = "Name of the table to export", required = true, type = "string") String tableName,
+        @ToolParameter(name = "schema", description = "Optional schema name (uses default if not provided)", type = "string") String schema,
+        @ToolParameter(name = "maxRows", description = "Maximum number of rows to export (default: 10000)", type = "integer") Integer maxRows
+    ) throws Exception {
+        return mcpToolService.exportTableToCsv(tableName, schema, maxRows);
+    }
+
+    @ToolDefinition(
+        name = "exportQueryToCsv",
+        description = "[ADVANCED] Export custom SQL query to CSV/Excel. Requires providing the exact SQL query as a parameter. ONLY use this if you need to export a NEW query that hasn't been executed yet. For exporting data the user just viewed, use exportLastQueryToCsv instead.",
+        priority = 70
+    )
+    public Map<String, Object> exportQueryToCsv(
+        @ToolParameter(name = "sql", description = "SQL SELECT query to execute and export (must be the EXACT query that retrieved the data)", required = true, type = "string") String sql,
+        @ToolParameter(name = "title", description = "Title for the exported file (default: 'query_export')", type = "string") String title,
+        @ToolParameter(name = "maxRows", description = "Maximum number of rows to export (default: 10000)", type = "integer") Integer maxRows
+    ) throws Exception {
+        return mcpToolService.exportQueryToCsv(sql, title, maxRows);
+    }
+
+    @ToolDefinition(
+        name = "exportQueryToPdf",
+        description = "Export SQL query results to PDF report. Best for smaller datasets (up to 1000 rows). Use when user asks for a 'PDF report', 'print-friendly version', or 'formatted report'.",
+        priority = 80
+    )
+    public Map<String, Object> exportQueryToPdf(
+        @ToolParameter(name = "sql", description = "SQL SELECT query to execute and export to PDF", required = true, type = "string") String sql,
+        @ToolParameter(name = "title", description = "Title for the PDF report (default: 'Query Results Report')", type = "string") String title,
+        @ToolParameter(name = "maxRows", description = "Maximum number of rows to include (default: 1000, PDFs work best with smaller datasets)", type = "integer") Integer maxRows
+    ) throws Exception {
+        return mcpToolService.exportQueryToPdf(sql, title, maxRows);
     }
 }

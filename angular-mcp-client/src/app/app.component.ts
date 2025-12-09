@@ -33,6 +33,17 @@ export class AppComponent implements OnInit, AfterViewChecked {
   private shouldScrollToBottom = false;
   currentThreadId: string | null = null;
   threadCount = 0;
+  
+  // Thread management
+  showThreadsPanel = true;
+  allThreads: Array<{id: string, preview: string, timestamp: number}> = [];
+  loadingThreads = false;
+  
+  // File upload and ChromaDB
+  selectedFiles: File[] = [];
+  useChromaDB = true;
+  chromaDBCollection = '';
+  showAdvancedOptions = true;
 
   constructor(
     private mcpService: McpClientService,
@@ -134,18 +145,34 @@ export class AppComponent implements OnInit, AfterViewChecked {
     
     this.isSendingMessage = true;
     
-    // Add user message to history
+    // Add user message to history with file info
+    let userContent = this.chatMessage;
+    if (this.selectedFiles.length > 0) {
+      const fileNames = this.selectedFiles.map(f => f.name).join(', ');
+      userContent += ` 📎 [${this.selectedFiles.length} file(s): ${fileNames}]`;
+    }
+    if (this.useChromaDB) {
+      userContent += ` 🔍 [ChromaDB${this.chromaDBCollection ? ': ' + this.chromaDBCollection : ''}]`;
+    }
+    
     this.chatHistory = [...this.chatHistory, {
       type: 'user',
-      content: this.chatMessage
+      content: userContent
     }];
     this.shouldScrollToBottom = true;
     
     const userMessage = this.chatMessage;
+    const options = {
+      files: this.selectedFiles,
+      useChromaDB: this.useChromaDB,
+      collectionName: this.chromaDBCollection || undefined
+    };
+    
     this.chatMessage = '';
+    this.selectedFiles = [];
     
     // Use the chat service with conversation threads
-    this.chatService.sendMessage(userMessage).subscribe({
+    this.chatService.sendMessage(userMessage, options).subscribe({
       next: (response) => {
         this.zone.run(() => {
           if (response.success && response.response) {
@@ -195,6 +222,14 @@ export class AppComponent implements OnInit, AfterViewChecked {
     this.chatService.newConversation();
     this.chatHistory = [];
     this.shouldScrollToBottom = true;
+    
+    // Add a system message to indicate new conversation started
+    this.chatHistory = [{
+      type: 'assistant',
+      content: '✨ <strong>New conversation started!</strong><br/>This is a fresh thread. Your previous conversation has been saved and can be accessed from the Threads panel.'
+    }];
+    
+    this.cdr.detectChanges();
   }
 
   clearConversation() {
@@ -222,17 +257,128 @@ export class AppComponent implements OnInit, AfterViewChecked {
     });
   }
 
-  showThreads() {
+  toggleThreadsPanel() {
+    this.showThreadsPanel = !this.showThreadsPanel;
+    if (this.showThreadsPanel) {
+      this.loadAllThreads();
+    }
+  }
+  
+  loadAllThreads() {
+    this.zone.run(() => {
+      this.loadingThreads = true;
+      this.cdr.detectChanges();
+    });
+    
     this.chatService.listThreads().subscribe({
       next: (response) => {
-        if (response.threads.length === 0) {
-          alert('No active conversations');
-        } else {
-          const threadList = response.threads.map(t => `• ${t}`).join('\n');
-          alert(`Active Conversations (${response.count}):\n\n${threadList}`);
-        }
+        // Load thread details with previews
+        const threadPromises = response.threads.map(threadId => 
+          this.chatService.getThreadHistory(threadId).toPromise().then(
+            history => {
+              const lastMessage = history?.messages && history.messages.length > 0 
+                ? history.messages[history.messages.length - 1].content 
+                : 'New conversation';
+              const preview = lastMessage.substring(0, 60) + (lastMessage.length > 60 ? '...' : '');
+              return {
+                id: threadId,
+                preview: preview,
+                timestamp: Date.now() // You can enhance this by parsing threadId or adding server-side timestamps
+              };
+            },
+            error => ({
+              id: threadId,
+              preview: 'Unable to load preview',
+              timestamp: Date.now()
+            })
+          )
+        );
+        
+        Promise.all(threadPromises).then(threads => {
+          this.zone.run(() => {
+            this.allThreads = threads.sort((a, b) => b.timestamp - a.timestamp);
+            this.loadingThreads = false;
+            this.cdr.detectChanges();
+          });
+        });
       },
-      error: (err) => alert(`Error: ${err.message}`)
+      error: (err) => {
+        console.error('Error loading threads:', err);
+        this.zone.run(() => {
+          this.loadingThreads = false;
+          this.cdr.detectChanges();
+        });
+      }
     });
+  }
+  
+  switchToThread(threadId: string) {
+    this.zone.run(() => {
+      this.loadingThreads = true;
+      this.cdr.detectChanges();
+    });
+    this.chatService.setThreadId(threadId);
+    
+    // Load thread history
+    this.chatService.getThreadHistory(threadId).subscribe({
+      next: (history) => {
+        this.zone.run(() => {
+          this.chatHistory = history.messages.map(msg => ({
+            type: msg.role === 'user' ? 'user' : 'assistant',
+            content: msg.content
+          }));
+          this.showThreadsPanel = false;
+          this.loadingThreads = false;
+          this.shouldScrollToBottom = true;
+          this.cdr.detectChanges();
+        });
+      },
+      error: (err) => {
+        console.error('Error loading thread history:', err);
+        this.zone.run(() => {
+          alert(`Failed to load thread: ${err.message}`);
+          this.loadingThreads = false;
+          this.cdr.detectChanges();
+        });
+      }
+    });
+  }
+  
+  deleteThread(threadId: string, event: Event) {
+    event.stopPropagation(); // Prevent switching to thread when deleting
+    
+    if (!confirm('Are you sure you want to delete this conversation?')) {
+      return;
+    }
+    
+    this.chatService.clearThread(threadId).subscribe({
+      next: () => {
+        // If we deleted the current thread, clear the UI
+        if (this.currentThreadId === threadId) {
+          this.chatHistory = [];
+          this.currentThreadId = null;
+        }
+        // Reload threads list
+        this.loadAllThreads();
+        this.loadThreadsCount();
+      },
+      error: (err) => {
+        console.error('Error deleting thread:', err);
+        alert(`Failed to delete thread: ${err.message}`);
+      }
+    });
+  }
+  
+  onFilesSelected(event: any) {
+    const files: FileList = event.target.files;
+    this.selectedFiles = Array.from(files);
+  }
+  
+  removeFile(index: number) {
+    this.selectedFiles = this.selectedFiles.filter((_, i) => i !== index);
+  }
+  
+  toggleAdvancedOptions() {
+    this.showAdvancedOptions = !this.showAdvancedOptions;
   }
 }

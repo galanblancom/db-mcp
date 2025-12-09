@@ -1,5 +1,7 @@
 package com.indrard.dbmcp.controller;
 
+import com.indrard.dbmcp.service.ChatService;
+import com.indrard.dbmcp.service.McpService;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,16 +17,20 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * MCP (Model Context Protocol) SSE Controller
+ * Implements SSE-based MCP server for tool discovery and execution.
+ * Delegates to AnnotationBasedFunctionProvider via McpService.
+ */
 @RestController
 public class McpSseController {
 
     private final CopyOnWriteArrayList<SseEmitter> emitters = new CopyOnWriteArrayList<>();
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private final com.indrard.dbmcp.service.McpService mcpService;
-    private final com.indrard.dbmcp.service.ChatService chatService;
+    private final McpService mcpService;
+    private final ChatService chatService;
 
-    public McpSseController(com.indrard.dbmcp.service.McpService mcpService,
-            com.indrard.dbmcp.service.ChatService chatService) {
+    public McpSseController(McpService mcpService, ChatService chatService) {
         this.mcpService = mcpService;
         this.chatService = chatService;
     }

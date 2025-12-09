@@ -29,7 +29,7 @@ public class OpenAIConfig {
     @Value("${openai.max.tokens:2000}")
     private int openaiMaxTokens;
 
-    @Value("${ollama.base.url:http://localhost:11434}")
+    @Value("${ollama.api.url:http://localhost:11434}")
     private String ollamaBaseUrl;
 
     @Value("${ollama.model:llama3.1}")
@@ -42,8 +42,13 @@ public class OpenAIConfig {
     @ConditionalOnProperty(name = "ai.provider", havingValue = "openai", matchIfMissing = true)
     public AIChatProvider openAiChatProvider() {
         if (apiKey == null || apiKey.isEmpty()) {
-            System.out.println("WARNING: OpenAI API key not configured. Chat features will be unavailable.");
-            return null;
+            System.out.println("WARNING: OpenAI API key not configured. Ollama chat provider will be used if configured.");
+
+            System.out.println("INFO: Configuring Ollama chat provider");
+            System.out.println("INFO: Base URL: " + ollamaBaseUrl);
+            System.out.println("INFO: Model: " + ollamaModel);
+            
+            return new OllamaChatProvider(ollamaBaseUrl, ollamaModel, ollamaTemperature);
         }
         
         System.out.println("INFO: Configuring OpenAI chat provider");

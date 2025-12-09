@@ -26,6 +26,12 @@ export interface ThreadsResponse {
   threads: string[];
 }
 
+export interface ChatOptions {
+  useChromaDB?: boolean;
+  collectionName?: string;
+  files?: File[];
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -42,16 +48,68 @@ export class ChatService {
   /**
    * Send a message in the current conversation thread
    * If no thread exists, creates a new one
+   * Supports file attachments and ChromaDB context
    */
-  sendMessage(message: string): Observable<ChatResponse> {
+  sendMessage(message: string, options?: ChatOptions): Observable<ChatResponse> {
+    console.log('Sending message with threadId:', this.currentThreadId);
+    console.log('Options:', options);
+
+    // If files provided, use multipart/form-data with /upload endpoint
+    if (options?.files && options.files.length > 0) {
+      const uploadUrl = this.currentThreadId 
+        ? `${this.apiUrl}/${this.currentThreadId}/upload`
+        : `${this.apiUrl}/upload`;
+      
+      console.log('Using upload URL:', uploadUrl);
+      
+      const formData = new FormData();
+      formData.append('message', message);
+      
+      if (options.useChromaDB) {
+        formData.append('useChromaDB', 'true');
+        if (options.collectionName) {
+          formData.append('collectionName', options.collectionName);
+        }
+      }
+      
+      options.files.forEach((file, index) => {
+        formData.append('files', file, file.name);
+      });
+
+      return this.http.post<ChatResponse>(uploadUrl, formData).pipe(
+        tap(response => {
+          console.log('Response received:', response);
+          if (response.success && response.threadId) {
+            console.log('Setting thread ID to:', response.threadId);
+            this.setThreadId(response.threadId);
+          } else {
+            console.warn('No thread ID in response or request failed');
+          }
+        }),
+        tap({
+          error: (error) => {
+            console.error('Chat API error:', error);
+          }
+        })
+      );
+    }
+
+    // Otherwise use JSON
     const url = this.currentThreadId 
       ? `${this.apiUrl}/${this.currentThreadId}`
       : this.apiUrl;
+    
+    console.log('Using JSON URL:', url);
+    
+    const body: any = { message };
+    if (options?.useChromaDB) {
+      body.useChromaDB = true;
+      if (options.collectionName) {
+        body.collectionName = options.collectionName;
+      }
+    }
 
-    console.log('Sending message with threadId:', this.currentThreadId);
-    console.log('URL:', url);
-
-    return this.http.post<ChatResponse>(url, { message }).pipe(
+    return this.http.post<ChatResponse>(url, body).pipe(
       tap(response => {
         console.log('Response received:', response);
         if (response.success && response.threadId) {
@@ -61,7 +119,6 @@ export class ChatService {
           console.warn('No thread ID in response or request failed');
         }
       }),
-      // Handle HTTP errors gracefully
       tap({
         error: (error) => {
           console.error('Chat API error:', error);
